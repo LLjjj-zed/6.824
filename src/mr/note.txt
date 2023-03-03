@@ -1,0 +1,3 @@
+woker向master请求任务，master中维护一个任务队列
+建立一个注册中心，并维护一个worker队列，worker启动后向注册中心发起注册请求，成功后加入worker队列中
+//worker定时向master发送心跳，master定时将心跳置零，对于5秒内未发出心跳的worker进行清除，并回收任务

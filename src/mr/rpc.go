@@ -1,18 +1,32 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
-
-import "os"
+import (
+	"fmt"
+	"os"
+)
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+const (
+	MapPhase    TaskPhase = 0
+	ReducePhase TaskPhase = 1
+)
+
+type Task struct {
+	FileName string
+	NReduce  int
+	NMaps    int
+	Seq      int //任务编号
+	Phase    TaskPhase
+	Alive    bool // 任务存活状态，false时worker退出
+}
+
+func reduceName(mapIdx, reduceIdx int) string {
+	return fmt.Sprintf("mr-%d-%d", mapIdx, reduceIdx)
+}
+
+func mergeName(reduceIdx int) string {
+	return fmt.Sprintf("mr-out-%d", reduceIdx)
+}
 
 type ExampleArgs struct {
 	X int
@@ -22,29 +36,31 @@ type ExampleReply struct {
 	Y int
 }
 
-type HeartbeatResponse struct {
-	lived bool
+type TaskArgs struct {
+	WorkerId int
 }
 
-type HeartbeatRequest struct {
-	lived bool
+type TaskReply struct {
+	Task *Task
 }
 
-type RePortRequest struct {
-
+type ReportTaskArgs struct {
+	Done     bool
+	Seq      int
+	Phase    TaskPhase
+	WorkerId int
 }
 
-type RePortResponse struct {
-
+type ReportTaskReply struct {
 }
 
-// Add your RPC definitions here.
+type RegisterArgs struct {
+}
 
+type RegisterReply struct {
+	WorkerId int
+}
 
-// Cook up a unique-ish UNIX-domain socket name
-// in /var/tmp, for the coordinator.
-// Can't use the current directory since
-// Athena AFS doesn't support UNIX-domain sockets.
 func coordinatorSock() string {
 	s := "/var/tmp/5840-mr-"
 	s += strconv.Itoa(os.Getuid())
