@@ -1,3 +1,17 @@
 woker向master请求任务，master中维护一个任务队列
 建立一个注册中心，并维护一个worker队列，worker启动后向注册中心发起注册请求，成功后加入worker队列中
 //worker定时向master发送心跳，master定时将心跳置零，对于5秒内未发出心跳的worker进行清除，并回收任务
+
+
+worker视角
+worker向master发出注册请求，master向worker发送worker编号
+worker向master请求任务，根据类型进行判断是map任务还是reduce任务
+最后worker向master汇报任务完成
+
+
+master视角
+master启动后根据调用参数分配reduce任务的数量，并开始分配map任务，master每隔500毫秒进行一次调度
+master接收到来自worker的注册请求，分配给worker id
+对于准备好分配的任务放入channel中，等待worker发送请求任务请求，接到请求后master将channel中第一个任务分配给worker，并更新任务状态
+当任务的时间片用完时，重新将任务放入channel中，等待下一次的调度
+当map任务全部完成后master开始调度reduce任务
