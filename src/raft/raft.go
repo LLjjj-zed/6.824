@@ -18,16 +18,16 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
-	"6.5840/labrpc"
+	"../labgob"
+	"../labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -50,7 +50,25 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-// A Go object implementing a single Raft peer.
+const (
+	Follower  int = 0
+	Candidate     = 1
+	Leader        = 2
+)
+
+func state2name(state int) string {
+	var name string
+	if state == Follower {
+		name = "Follower"
+	} else if state == Candidate {
+		name = "Candidate"
+	} else if state == Leader {
+		name = "Leader"
+	}
+	return name
+}
+
+// Raft A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -62,15 +80,57 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	applyCh  chan ApplyMsg //消息通道
+	state    int           //节点状态（Follower, Candidate , Leader）
+	leaderId int           //Leader ID
+
+	applyCond     *sync.Cond //在更新commitIndex时为新提交的条目发出信号
+	leaderCond    *sync.Cond //当有新的节点成为领导者时，为heartbeatPeriodTick提供信号
+	nonLeaderCond *sync.Cond //当节点放弃领导权时，为electionTimeoutTick提供信号。
+
+	electionTimeout int   //election timout(heartbeat timeout)
+	heartbeatPeriod int   //发送heartbeat的时机
+	latestIssueTime int64 //最新的leader发送心跳的时间
+	latestHeardTime int64 //最新的收到leader的AppendEntries RPC(包括heartbeat)或给予candidate的RequestVote RPC投票的时间
+
+	electionTimeoutChan chan bool //写入electionTimeoutChan意味着可以发起一次选举
+	heartbeatPeriodChan chan bool //写入heartbeatPeriodChan意味leader需要向其他peers发送一次心跳
+
+	//需要持久化到磁盘的字段
+	CurrentTerm int        //当前的任期
+	VoteFor     int        //标识本轮任期中将选票投给了哪个candidate
+	Log         []LogEntry //Log日志
+
+	commitIndex int //已知已提交的最高日志条目的索引
+	lastApplied int //应用于状态机的最高日志条目的索引
+
+	nVotes int //获得的总票数
+
+	nextIndex  []int //对于每个服务器，要发送给该服务器的下一个日志条目的索引
+	matchIndex []int //对于每台服务器，已知在其上复制的最高日志条目的索引
 }
 
-// return currentTerm and whether this server
+// LogEntry Log entry struct
+type LogEntry struct {
+	Command interface{} // 状态机的命令
+	Term    int         // 任期
+}
+
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.CurrentTerm
+	if rf.state == Leader {
+		isleader = true
+	} else {
+		isleader = false
+	}
 	return term, isleader
 }
 
@@ -90,10 +150,27 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	buffer := new(bytes.Buffer)
+	e := labgob.NewEncoder(buffer)
+	err := e.Encode(rf.CurrentTerm)
+	if err != nil {
+		log.Println("write persist: encode err ", err.Error())
+	}
+	err = e.Encode(rf.VoteFor)
+	if err != nil {
+		log.Println("write persist: encode err ", err.Error())
+	}
+	err = e.Encode(rf.Log)
+	if err != nil {
+		log.Println("write persist: encode err ", err.Error())
+	}
+	data := buffer.Bytes()
+	rf.persister.SaveRaftState(data)
+	log.Printf("[persist]: Id %d Term %d State %s\t||\tsave persistent state\n", rf.me, rf.CurrentTerm, state2name(rf.state))
 }
 
-
-// restore previously persisted state.
+// readPersist restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -111,10 +188,23 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	buffer := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(buffer)
+	var currentTerm int
+	var voteFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(voteFor) != nil || d.Decode(logs) != nil {
+		log.Fatal("readPersist : decode error!")
+	} else {
+		rf.CurrentTerm = currentTerm
+		rf.VoteFor = voteFor
+		rf.Log = logs
+	}
+	log.Printf("readPersist: Id %d Term %d State %s\t||\trestore persistent state from Persister\n", rf.me, rf.CurrentTerm, state2name(rf.state))
 }
 
-
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -123,6 +213,17 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
+type AppendEntriesArgs struct {
+	Term         int        //leader任期
+	LeaderId     int        //leader ID
+	PrevLogIndex int        //前一个日志的index
+	PrevLogTerm  int        //PrevLogIndex的任期
+	Entries      []LogEntry //存储的日志（心跳时为空；为了提高效率，可以发送多条，以提高效率)
+	LeaderCommit int        //LeaderCommitIndex
+}
+
+type AppendEntriesReply struct {
+}
 
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -173,7 +274,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -192,7 +292,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -221,7 +320,6 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -253,7 +351,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
