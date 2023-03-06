@@ -205,15 +205,6 @@ func (rf *Raft) readPersist(data []byte) {
 	log.Printf("readPersist: Id %d Term %d State %s\t||\trestore persistent state from Persister\n", rf.me, rf.CurrentTerm, state2name(rf.state))
 }
 
-// Snapshot the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
-
 type AppendEntriesArgs struct {
 	Term         int        //leader任期
 	LeaderId     int        //leader ID
